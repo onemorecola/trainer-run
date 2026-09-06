@@ -42,7 +42,15 @@ ln -s "$(pwd)/trainer-run" ~/.local/bin/trainer-run
 trainer-run              # сканировать папку по умолчанию и показать меню
 trainer-run /путь/к/папке
 trainer-run --list       # просто показать найденное и подобранные игры
+trainer-run --fix-dotnet # поставить .NET 4.0 в префикс игры (чинит новые FLiNG)
 ```
+
+> **`--fix-dotnet`**: FLiNG-трейнеры, выпущенные после июля 2023, собраны под
+> .NET Framework и молча падают в префиксе, где есть только Wine Mono.
+> Режим подбирает игру так же, как обычный запуск, но вместо запуска
+> трейнера ставит в её префикс `dotnet40` (один раз на игру). После этого
+> трейнер запускается и через trainer-run, и через CheatDeck/launch options.
+> Если не помогло — попробуйте вручную `protontricks <App ID> dotnet48`.
 
 Пример меню:
 
@@ -71,10 +79,44 @@ trainer-run --list       # просто показать найденное и �
 |---------------------|-------------------------------------|--------------------------|
 | `TRAINER_RUN_FOLDER`| папка со скачанными трейнерами     | `/mnt/Files/Загрузки`    |
 | `STEAM_ROOT`        | корень Steam (папка с `steamapps`)  | `~/.local/share/Steam`   |
+| `PROTONTRICKS_LAUNCH` | команда запуска exe в префиксе   | `protontricks-launch`    |
+| `PROTONTRICKS`      | команда winetricks-действий         | `protontricks`           |
 
 ```sh
 TRAINER_RUN_FOLDER=/home/user/Загрузки trainer-run
 ```
+
+## Steam Deck
+
+Работает и на Steam Deck (SteamOS — это Arch). Корень Steam там тот же —
+`~/.local/share/Steam`, так что подбор App ID работает из коробки.
+Нужны только protontricks и правильные переменные.
+
+1. **Desktop Mode** → поставь из Discover flatpak-версию protontricks
+   (`com.github.Matoking.protontricks`).
+2. Пропиши команды для flatpak (или положи в `~/.bashrc`):
+
+   ```sh
+   export PROTONTRICKS_LAUNCH="flatpak run com.github.Matoking.protontricks launch --no-bwrap"
+   export PROTONTRICKS="flatpak run com.github.Matoking.protontricks --no-bwrap"
+   ```
+
+3. Запускай с папкой загрузок Дека:
+
+   ```sh
+   TRAINER_RUN_FOLDER=/home/deck/Downloads trainer-run
+   ```
+
+4. Если новые FLiNG-трейнеры молча не стартуют (типичная беда CheatDeck) —
+   один раз на игру прогони фикс .NET:
+
+   ```sh
+   trainer-run --fix-dotnet /home/deck/Downloads/имя_трейнера.exe
+   ```
+
+   После этого CheatDeck / launch options в Gaming Mode подхватят трейнер
+   штатно. В самом Gaming Mode текстовое меню неудобно — trainer-run
+   рассчитан на Desktop Mode либо на запуск «рядом» с CheatDeck.
 
 ## Ярлык в меню приложений (GNOME)
 
