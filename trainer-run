@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""trainer-run — универсальный запуск FLiNG-трейнеров для Steam-игр под Proton.
+
+Сканирует папку (по умолчанию /mnt/Files/Загрузки) на .exe,
+даёт выбрать трейнер цифрой, сам подбирает игру (App ID) по имени файла
+и запускает трейнер в префиксе игры через protontricks-launch.
+
+Использование:
+  trainer-run [ПАПКА]          — обычный запуск
+  trainer-run --list           — только показать найденное и уйти
+
+Пути можно переопределить переменными окружения:
+  TRAINER_RUN_FOLDER=/путь trainer-run
+  STEAM_ROOT=/путь/к/Steam    trainer-run
+"""
+import os, re, sys, glob, subprocess, difflib
+
+FOLDER = os.environ.get("TRAINER_RUN_FOLDER", "/mnt/Files/Загрузки")
+STEAM_ROOT = os.environ.get("STEAM_ROOT",
+                            os.path.expanduser("~/.local/share/Steam"))
+ONLY_LIST = "--list" in sys.argv
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+if ARGS:
+    FOLDER = ARGS[0]
+
+CLUTTER = {"trainer", "trainers", "plus", "updated", "update", "fling", "cheat",
+           "cheats", "remake", "by", "upd", "v1", "v2", "v3", "new"}
+SKIP_DIRS = {"asf"}
+
+def norm(s):
+    return re.sub(r"[^a-zа-яё0-9]+", " ", s.lower()).strip()
+
+def sig_tokens(name):
+    s = norm(name)
+    return [t for t in s.split()
+            if t not in CLUTTER and not re.fullmatch(r"v?\d[\d\.\-_]*", t)]
+
+def steam_games():
+    """Все библиотеки Steam + их appmanifest'ы -> [(appid, name)]"""
+    libs = [os.path.join(STEAM_ROOT, "steamapps")]
+    vdf = os.path.join(STEAM_ROOT, "steamapps", "libraryfolders.vdf")
+    if os.path.isfile(vdf):
+        txt = open(vdf, encoding="utf-8", errors="ignore").read()
+        libs += [m for m in re.findall(r'"path"\s+"([^"]+)"', txt)]
+    seen, games = set(), []
+    for lib in libs:
+        for f in glob.glob(os.path.join(lib, "steamapps", "appmanifest_*.acf")):
+            try:
+                t = open(f, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+            aid = re.search(r'"appid"\s+"(\d+)"', t)
+            nm = re.search(r'"name"\s+"([^"]+)"', t)
+            if aid and nm and aid.group(1) not in seen:
+                seen.add(aid.group(1))
+                games.append((int(aid.group(1)), nm.group(1)))
+    return games
+
+def find_exes(folder):
+    out = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS and not d.startswith(".")]
+        for fn in files:
+            if fn.lower().endswith(".exe"):
+                p = os.path.join(root, fn)
+                try:
+                    sz = os.path.getsize(p)
+                except OSError:
+                    sz = 0
+                out.append((p, sz))
+    out.sort(key=lambda x: (0 if "trainer" in os.path.basename(x[0]).lower() else 1,
+                            x[0].lower()))
+    return out
+
+def pick(header, items, extra=()):
+    """items: список (метка, value). Печатает меню, возвращает value или None."""
+    print(header)
+    lines = list(items)
+    for i, (label, _v) in enumerate(lines, 1):
+        print(f"  {i:>2}) {label}")
+    base = len(lines)
+    for j, (label, _v) in enumerate(extra, base + 1):
+        print(f"  {j:>2}) {label}")
+    print(f"  {base + len(extra) + 1:>2}) отмена")
+    while True:
+        try:
+            n = int(input("Выбор: ").strip())
+        except (ValueError, EOFError):
+            return None
+        if n == 0 or n == base + len(extra) + 1:
+            return None
+        if 1 <= n <= base:
+            return items[n - 1][1]
+        if base < n <= base + len(extra):
+            return extra[n - base - 1][1]
+        print("  неверный номер")
+
+def match_games(filename, games):
+    """Подбор игры по имени файла трейнера."""
+    ft = set(sig_tokens(os.path.basename(filename)))
+    cands = []
+    for appid, name in games:
+        low = name.lower()
+        if "proton" in low or "runtime" in low or "steam linux" in low:
+            continue
+        gt = set(sig_tokens(name))
+        overlap = len(ft & gt) / max(1, len(ft))
+        ratio = difflib.SequenceMatcher(None, norm(name), norm(filename)).ratio()
+        if overlap > 0 or ratio > 0.35:
+            cands.append((overlap * 1.0 + ratio * 0.6, appid, name, overlap))
+    cands.sort(key=lambda x: (-x[0], x[2].lower()))
+    return [(f"{name}  [App ID {appid}]", appid) for _sc, appid, name, _ov in cands[:6]]
+
+def main():
+    if not os.path.isdir(FOLDER):
+        print(f"Папка не найдена: {FOLDER}")
+        sys.exit(1)
+
+    exes = find_exes(FOLDER)
+    if not exes:
+        print(f"В {FOLDER} не найдено ни одного .exe")
+        sys.exit(1)
+
+    games = steam_games()
+    root = os.path.abspath(FOLDER)
+
+    if ONLY_LIST:
+        print("Найденные .exe и подобранные игры:\n")
+        for p, _sz in exes:
+            guess = match_games(p, games)
+            g = f"-> {guess[0][0]}" if guess else "-> (игра не найдена)"
+            print(f"  {os.path.relpath(p, root)}")
+            print(f"      {g}")
+        print(f"\nИгр в Steam: {len(games)}")
+        return
+
+    # главное меню: только файлы с «trainer» в имени; остальное — за опцией
+    trainer_like = [(p, s) for p, s in exes if "trainer" in os.path.basename(p).lower()]
+    rest = [(p, s) for p, s in exes if p not in {x[0] for x in trainer_like}]
+    near, deep = [], []
+    for p, s in rest:
+        rel = os.path.relpath(p, root)
+        if rel.count(os.sep) <= 1:
+            near.append((p, s))
+        else:
+            deep.append((p, s))
+
+    if trainer_like:
+        items = [(os.path.basename(p), p) for p, _s in trainer_like]
+        extra = [("(показать остальные .exe — без «trainer» в имени)", "__ALL__")]
+    else:
+        items = [(os.path.basename(p), p) for p, _s in near]
+        extra = [("(показать .exe в глубоких подпапках)", "__ALL__")]
+        if not items:
+            items = [(os.path.relpath(p, root), p) for p, _s in deep]
+            extra = []
+
+    trainer = pick("\nЧто запускаем:", items, extra)
+    if trainer is None:
+        print("Отменено.")
+        return
+    if trainer == "__ALL__":
+        items = [(f"{os.path.relpath(p, root)}", p) for p, _s in exes]
+        trainer = pick("\nВсе найденные .exe:", items)
+        if trainer is None:
+            print("Отменено.")
+            return
+
+    cands = match_games(trainer, games)
+    if cands:
+        appid = pick("\nПохоже, трейнер для игры:", cands)
+        if appid is None:
+            return
+    else:
+        print("\nНе удалось подобрать игру по имени файла.")
+        raw = input("Введи App ID игры вручную (или Enter = отмена): ").strip()
+        if not raw.isdigit():
+            print("Отменено.")
+            return
+        appid = int(raw)
+
+    print(f"\nЗапускаю трейнер в префиксе игры {appid}...")
+    print("(игра должна быть запущена — иначе трейнер напишет game not found)\n")
+    cmd = ["protontricks-launch", "--appid", str(appid), trainer]
+    subprocess.run(cmd)
+
+if __name__ == "__main__":
+    main()
