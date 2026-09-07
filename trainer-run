@@ -47,6 +47,9 @@ CLUTTER = {"trainer", "trainers", "plus", "updated", "update", "fling", "cheat",
            "cheats", "remake", "by", "upd", "v1", "v2", "v3", "new"}
 SKIP_DIRS = {"asf"}
 
+# Свежие FLiNG-трейнеры (после ~июля 2023) добавляют в имя дату сборки вида v20260619
+NEW_FLING = re.compile(r"v20[2-9][0-9]+", re.IGNORECASE)
+
 def pt_cmd(base):
     """Разобрать команду protontricks из переменной окружения (поддержка flatpak)."""
     return shlex.split(base) if base and base.strip() else []
@@ -187,6 +190,40 @@ def launch_trainer(trainer, appid):
     cmd = pt_cmd(PT_LAUNCH) + ["--appid", str(appid), trainer]
     subprocess.run(cmd)
 
+def prefix_path(appid):
+    """Вернуть путь к префиксу игры (compatdata/<appid>/pfx) или None."""
+    libs = [os.path.join(STEAM_ROOT, "steamapps")]
+    vdf = os.path.join(STEAM_ROOT, "steamapps", "libraryfolders.vdf")
+    if os.path.isfile(vdf):
+        txt = open(vdf, encoding="utf-8", errors="ignore").read()
+        libs += [m for m in re.findall(r'"path"\s+"([^"]+)"', txt)]
+    for lib in libs:
+        p = os.path.join(lib, "steamapps", "compatdata", str(appid), "pfx")
+        if os.path.isdir(p):
+            return p
+    return None
+
+def netfx_installed(appid):
+    """True, если в префиксе игры стоит настоящий .NET, а не Wine Mono.
+
+    Wine ставит Mono-заглушку в Microsoft.NET/.../v4.0.30319 — новые
+    FLiNG-трейнеры под ней молча падают. Настоящий .NET (winetricks
+    dotnet40/dotnet48) кладёт mscorlib.dll без Mono-атрибутов.
+    """
+    pfx = prefix_path(appid)
+    if not pfx:
+        return False  # префикса нет — считаем, что .NET не ставили
+    for arch in ("Framework64", "Framework"):
+        dll = os.path.join(pfx, "drive_c", "windows", "Microsoft.NET", arch,
+                           "v4.0.30319", "mscorlib.dll")
+        if os.path.isfile(dll):
+            try:
+                head = open(dll, "rb").read(2 * 1024 * 1024)
+            except OSError:
+                return False
+            return b"Mono" not in head
+    return False
+
 def fix_dotnet(trainer, appid):
     """Ставит .NET Framework 4.0 в префикс игры.
 
@@ -241,6 +278,20 @@ def main():
 
     if FIX_DOTNET:
         fix_dotnet(trainer, appid)
+    elif NEW_FLING.search(os.path.basename(trainer)) and not netfx_installed(appid):
+        # Свежий FLiNG-трейнер (.NET) в префиксе без настоящего .NET — молча падает.
+        # Предлагаем поставить dotnet40 один раз (можно пропустить).
+        print("\nПохоже, это свежий FLiNG-трейнер (собран под .NET),")
+        print("а в префиксе игры только Wine Mono — трейнер может молча закрыться.")
+        ans = input("Поставить .NET Framework 4.0 в префикс сейчас? [д/Н]: ").strip().lower()
+        if ans in ("д", "y", "да", "yes"):
+            fix_dotnet(trainer, appid)
+            again = input("\nЗапустить трейнер теперь? [д/Н]: ").strip().lower()
+            if again in ("д", "y", "да", "yes"):
+                launch_trainer(trainer, appid)
+        else:
+            print("Ок, запускаю без .NET — если трейнер закроется, используй --fix-dotnet.")
+            launch_trainer(trainer, appid)
     else:
         launch_trainer(trainer, appid)
 
